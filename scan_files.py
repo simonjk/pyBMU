@@ -1,0 +1,277 @@
+import os
+import sys
+import traceback
+import re
+
+from dbhelper import DBHelper
+from filehelper import FileHelper
+from loghelper import LogHelper
+
+class ScanFiles:
+    backup_group = 1
+    run_id = -1
+    log_helper = LogHelper()
+    log = log_helper.getLogger()
+    db_helper = DBHelper()
+    db_data = db_helper.getDictCursor()
+    cursor = db_data["cursor"]
+    file_helper = FileHelper()
+    file_filter = []
+    dir_filter = []
+
+    def __init__(self, backup_group_id):
+        self.backup_group = backup_group_id
+        self.create_run()
+        self.load_filters()
+
+    def load_filters(self):
+        cursor = self.cursor
+        sql_loadfilefilter = 'Select expression from FILTERS ' \
+                             'where (BACKUPGROUP_ID = %s OR BACKUPGROUP_ID is null) ' \
+                             'and file = 1'
+        sql_loaddirfilter = 'Select expression from FILTERS ' \
+                            'where (BACKUPGROUP_ID = %s OR BACKUPGROUP_ID is null) ' \
+                            'and dir = 1'
+        try:
+            cursor.execute(sql_loaddirfilter,(self.backup_group))
+            result = cursor.fetchall()
+            self.dir_filter = self.compile_filters(result)
+
+            cursor.execute(sql_loadfilefilter, (self.backup_group))
+            result = cursor.fetchall()
+            self.file_filter = self.compile_filters(result)
+
+
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+    def compile_filters(self,result_set):
+        result = []
+        for data in result_set:
+            raw_filter = '^(?=.*'+data["expression"].replace('*', '(.*)') + ').*'
+            print (raw_filter)
+            filter = re.compile(raw_filter)
+            result.append(filter)
+        return result
+
+    def check_filter(self, filters, path):
+        for filter in filters:
+            match = filter.match(path)
+            if match:
+                return True
+        return False
+
+
+    def create_run(self):
+        cursor = self.cursor
+
+        sql = "INSERT INTO RUNS (BACKUPGROUP_ID, TIME_STARTED) VALUES (%s, CURRENT_TIMESTAMP)"
+        try:
+            cursor.execute(sql,(self.backup_group))
+            self.run_id = cursor.lastrowid
+
+            self.log.info({'action': 'Create Run_ID', 'run_id': self.run_id, 'backup_group': self.backup_group})
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+
+
+    def scan_for_files(self):
+        cursor = self.cursor
+        sql_dirs = 'Select PATH from DIRECTORY where BACKUPGROUP_ID = %s'
+        sql_insert_bu = 'INSERT INTO BACKUPITEMS (RUN_ID, PATH, FILESIZE, LASTMODIFIED) VALUES (%s, %s, %s, %s)'
+
+        # ---------------- Get Rlevant Base Dirs
+        try:
+            cursor.execute(sql_dirs,(self.backup_group))
+            dirs = cursor.fetchall()
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+        # ---------------- Scan Dirs
+        totalfiles = 0
+        for dir in dirs:
+            filesperdir = 0
+            filterdfiles = 0
+            self.log.info({'action': 'Start scanning Dir', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                           'dir': dir['PATH']} )
+            for root, dirs, files in os.walk(dir['PATH']):
+                for file in files:
+                    filesperdir += 1
+
+                    filedata = {}
+                    filedata['filepath'] = os.path.join(root, file)
+                    filedata['mtime'] = int(round( os.path.getmtime(filedata['filepath']) * 1000))
+                    filedata['size'] = os.stat(filedata['filepath']).st_size
+
+                    # file filter
+                    filename = self.file_helper.get_filename(filedata['filepath'])
+                    if self.check_filter(self.file_filter,filename):
+                        print("Filtered (file) out "+ filedata['filepath'] + ' (' + filename + ')' )
+                        filterdfiles += 1
+                        continue
+
+                    # dir filter
+                    parent = self.file_helper.get_parent(filedata['filepath'])
+                    if self.check_filter(self.dir_filter, parent):
+                        print("Filtered (dir) out " + filedata['filepath'] + ' (' + parent + ')')
+                        filterdfiles += 1
+                        continue
+
+                    totalfiles += 1
+                    try:
+                        cursor.execute(sql_insert_bu, (self.run_id, filedata['filepath'], filedata['size'], filedata['mtime']))
+
+                    except Exception as e:
+                        print("Exception")  # sql error
+                        print(e)
+                        tb = e.__traceback__
+                        traceback.print_tb(tb)
+
+                    print(filedata)
+            self.log.info({'action': 'End scanning Dir', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                           'dir': dir['PATH'], 'count': filesperdir, 'filtered': filterdfiles})
+
+        self.log.info({'action': 'End scanning Dirs', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                        'count': totalfiles})
+
+        # ---------------- set Item ID and Hash for Unchanged
+        sql_updateunchanged = """
+                    Update BACKUPITEMS t
+                    inner join
+                    BACKUPITEMS as n
+                    on  t.id = n.id
+                    inner join BACKUPITEMS as c
+                    on c.path = n.path and c.FILESIZE = n.FILESIZE and c.lastmodified = n.lastmodified
+                    inner join NEWESTBU x
+                    on c.id = x.id
+                    SET t.item_id = c.item_id, t.hash=c.hash
+                    where x.backupgroup_id = %s and n.run_id = %s
+                """
+
+        try:
+            affected_rows = cursor.execute(sql_updateunchanged, (self.backup_group, self.run_id))
+            self.log.info({'action': 'Updated Unchanged', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                           'count': affected_rows})
+
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+        # ------------------ Hash unknown
+        sql_getunhashed = 'Select * from BACKUPITEMS where run_id = %s and item_id is null'
+        sql_sethash = 'UPDATE BACKUPITEMS SET HASH = %s WHERE id = %s'
+        sql_matchwithitems = """
+            UPDATE BACKUPITEMS t
+            inner join BACKUPITEMS b
+            on t.id = b.id
+            inner join ITEMS i
+            on i.hash = b.hash
+            SET b.ITEM_ID = i.id
+            where i.backupgroup_id = %s and (b.ITEM_ID is null or b.ITEM_ID = 0)
+        """
+        sql_insertitems = """
+            Insert into ITEMS(backupgroup_id, hash)
+            SELECT %s as backupgroup_id, hash from BACKUPITEMS
+            where run_id = %s and (ITEM_ID is null or ITEM_ID = 0) and not HASH is null
+        """
+        try:
+            cursor.execute(sql_getunhashed,(self.run_id))
+            unhashed = cursor.fetchall()
+            to_hash = len(unhashed)
+            hashed = 0
+            self.log.info({'action': 'Start Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                           'count': to_hash})
+            for bui in unhashed:
+
+                hash = self.file_helper.hash_file(bui["PATH"])
+                cursor.execute(sql_sethash,(hash, bui['ID'] ))
+                hashed += 1
+                if hashed%1000 == 0:
+                    self.log.info(
+                        {'action': 'Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                         'count': hashed, 'total': to_hash})
+
+            self.log.info(
+                {'action': 'Finished Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                 'count': hashed, 'total': to_hash})
+
+            matched = cursor.execute(sql_matchwithitems, (self.backup_group))
+            self.log.info(
+                {'action': 'Matched Existing Hashes', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                 'count': matched})
+
+
+            inserted = cursor.execute(sql_insertitems,(self.backup_group, self.run_id))
+            self.log.info(
+                {'action': 'Inserted new Hashes', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                 'count': inserted})
+
+            matched = cursor.execute(sql_matchwithitems, (self.backup_group))
+            self.log.info(
+                {'action': 'Matched new Hashes', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                 'count': matched})
+
+
+
+
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+        # ------------------ SET Hashing Complete and recreate NEWESTBU
+        sql_sethashingsuccess = 'UPDATE RUNS SET SUCESSFUL = 1 WHERE ID = %s'
+        sql_truncatenewestbu = 'truncate table NEWESTBU'
+        sql_recreatenewestbu = """
+            INSERT INTO NEWESTBU
+            SELECT max(b.id) as id, r.backupgroup_id FROM BACKUPITEMS b
+            inner join RUNS r
+            on r.id = b.run_id
+            where not b.hash is null
+            group by r.backupgroup_id, path
+            """
+        try:
+            cursor.execute(sql_sethashingsuccess,(self.run_id))
+            self.log.info(
+                {'action': 'Scanning and Hashing successful', 'run_id': self.run_id, 'backup_group': self.backup_group}
+            )
+
+            cursor.execute(sql_truncatenewestbu)
+            self.log.info(
+                {'action': 'NEWESTBU truncated', 'run_id': self.run_id, 'backup_group': self.backup_group}
+            )
+
+            inserted = cursor.execute(sql_recreatenewestbu)
+            self.log.info(
+                {'action': 'Recreated NEWESTBU', 'run_id': self.run_id, 'backup_group': self.backup_group,
+                 'count': inserted})
+
+
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+
+
+
+def main():
+    scan_files = ScanFiles(int(sys.argv[1]))
+    scan_files.scan_for_files()
+
+if __name__ == "__main__":
+        main()

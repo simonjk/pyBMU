@@ -4,10 +4,16 @@ from pathlib import Path
 import shutil
 import os
 
+
 class FileHelper():
 
+
     def path_from_hash(self, root,drive,hash):
-        return root+'\\'+drive+'\\'+hash[:2]+'\\'+hash[:4]+'\\'+hash[:6]+'\\'+hash[:8]+'\\'+hash
+        reserved = ['com1','com2','com3','com4','com5','com6','com7','com8','com9','lpt1','lpt2','lpt3','lpt4','lpt5','lpt6','lpt7','lpt8','lpt9']
+        fourset = hash[:4]
+        if fourset in reserved:
+            fourset = fourset + '_'
+        return root+'\\'+drive+'\\'+hash[:2]+'\\'+fourset+'\\'+hash[:6]+'\\'+hash[:8]+'\\'+hash
 
     def file_exists(self, file):
         my_file = Path(file)

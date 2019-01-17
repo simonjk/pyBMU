@@ -2,6 +2,7 @@ import os
 import sys
 import traceback
 import re
+import time
 
 from dbhelper import DBHelper
 from filehelper import FileHelper
@@ -102,11 +103,15 @@ class ScanFiles:
         for dir in dirs:
             filesperdir = 0
             filterdfiles = 0
+            started = int(round(time.time() * 1000))
             self.log.info({'action': 'Start scanning Dir', 'run_id': self.run_id, 'backup_group': self.backup_group,
                            'dir': dir['PATH']} )
             for root, dirs, files in os.walk(dir['PATH']):
                 for file in files:
                     filesperdir += 1
+
+                    if filesperdir%1000 == 0:
+                        cursor = self.new_connection()
 
                     filedata = {}
                     filedata['filepath'] = os.path.join(root, file)
@@ -132,14 +137,22 @@ class ScanFiles:
                         cursor.execute(sql_insert_bu, (self.run_id, filedata['filepath'], filedata['size'], filedata['mtime']))
 
                     except Exception as e:
+                        cursor = self.new_connection()
                         print("Exception")  # sql error
                         print(e)
                         tb = e.__traceback__
                         traceback.print_tb(tb)
 
                     print(filedata)
+            finished = int(round(time.time() * 1000))
+            duration = finished - started
+            divider = 1
+            if filesperdir > 0:
+                divider = filesperdir
+            per_file = duration / divider
             self.log.info({'action': 'End scanning Dir', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                           'dir': dir['PATH'], 'count': filesperdir, 'filtered': filterdfiles})
+                           'dir': dir['PATH'], 'count': filesperdir, 'duration': duration, 'per_file': per_file, 'filtered': filterdfiles})
+            cursor = self.new_connection()
 
         self.log.info({'action': 'End scanning Dirs', 'run_id': self.run_id, 'backup_group': self.backup_group,
                         'count': totalfiles})
@@ -193,6 +206,7 @@ class ScanFiles:
             hashed = 0
             self.log.info({'action': 'Start Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
                            'count': to_hash})
+            started = int(round(time.time() * 1000))
             for bui in unhashed:
 
                 hash = self.file_helper.hash_file(bui["PATH"])
@@ -203,9 +217,15 @@ class ScanFiles:
                         {'action': 'Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
                          'count': hashed, 'total': to_hash})
 
+            finished = int(round(time.time() * 1000))
+            duration = finished - started
+            divider = 1
+            if hashed > 0:
+                divider = hashed
+            per_file = duration / divider
             self.log.info(
                 {'action': 'Finished Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': hashed, 'total': to_hash})
+                 'count': hashed, 'duration': duration, 'per_file': per_file, 'total': to_hash})
 
             matched = cursor.execute(sql_matchwithitems, (self.backup_group))
             self.log.info(
@@ -248,16 +268,18 @@ class ScanFiles:
             self.log.info(
                 {'action': 'Scanning and Hashing successful', 'run_id': self.run_id, 'backup_group': self.backup_group}
             )
-
+            started = int(round(time.time() * 1000))
             cursor.execute(sql_truncatenewestbu)
             self.log.info(
                 {'action': 'NEWESTBU truncated', 'run_id': self.run_id, 'backup_group': self.backup_group}
             )
 
             inserted = cursor.execute(sql_recreatenewestbu)
+            finished = int(round(time.time() * 1000))
+            duration = finished - started
             self.log.info(
                 {'action': 'Recreated NEWESTBU', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': inserted})
+                 'count': inserted, 'duration': duration})
 
 
         except Exception as e:
@@ -265,6 +287,12 @@ class ScanFiles:
             print(e)
             tb = e.__traceback__
             traceback.print_tb(tb)
+
+    def new_connection(self):
+        self.db_helper.close(self.db_data)
+        self.db_data = self.db_helper.getDictCursor()
+        self.cursor = self.db_data["cursor"]
+        return self.cursor
 
 
 

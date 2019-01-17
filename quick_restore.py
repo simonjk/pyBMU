@@ -1,4 +1,5 @@
 import os
+import traceback
 
 from dbhelper import DBHelper
 from filehelper import FileHelper
@@ -34,6 +35,8 @@ def main():
     files_to_restore = cursor.fetchall()
 
     count = 0
+    errors = ""
+    error_list =[]
     for file_to_restore in files_to_restore:
         # print(file_to_restore)
         unescaped_path =  file_to_restore['PATH'].replace('\\\\','\\')
@@ -43,17 +46,25 @@ def main():
         file_to_restore['PATH'] = unescaped_path
         tgt = file_to_restore['PATH']
         src = file_helper.path_from_hash(os.getenv('BMU_INT_ROOT'), file_to_restore['DRIVE'], file_to_restore['HASH'])
-        while not file_helper.file_exists(src):
-            print("Missing: "+ src)
-            input("Press Enter to continue...")
-        if file_helper.file_exists(src):
-            if not file_helper.file_exists(tgt):
-                file_helper.create_parent_if_not_exist(tgt)
-                file_helper.copy_file(src,tgt)
-                count =+ 1
+        if not file_helper.file_exists(tgt):
+            while not file_helper.file_exists(src):
+                print("Missing: " + src)
+                input("Press Enter to continue...")
+            if file_helper.file_exists(src):
+                try:
+                    file_helper.create_parent_if_not_exist(tgt)
+                    file_helper.copy_file(src,tgt)
+                except Exception as e:
+                    print("Exception")  # sql error
+                    print(e)
+                    tb = e.__traceback__
+                    traceback.print_tb(tb)
+                    errors += "Could not Copy " + src + " to " + tgt + ": " +str(e)
+                    error_list.append({"source": src, "target": tgt, "exception": str(e)})
+                count += 1
                 print(tgt + " sucessfully restored ["+str(count)+"]")
-            else:
-                print(tgt + "allready exists, skipping")
+        else:
+            print(tgt + "allready exists, skipping")
         if count%1000 == 0:
             log.info({'action': 'Restore finished', 'BMU_PATH_SELECT': os.getenv('BMU_PATH_SELECT'),
                                'BMU_PATH_RUNID': os.getenv('BMU_PATH_RUNID'), 'count': count,
@@ -62,7 +73,7 @@ def main():
     log.info({'action': 'Restore finished', 'BMU_PATH_SEARCH': os.getenv('BMU_PATH_SEARCH'),
               'BMU_PATH_REPLACE': os.getenv('BMU_PATH_REPLACE'), 'BMU_PATH_RUNID': os.getenv('BMU_PATH_RUNID'),
               'BMU_PATH_DELIM': os.getenv('BMU_PATH_DELIM'), 'BMU_PATH_DEPTH': os.getenv('BMU_PATH_DEPTH'),
-              'BMU_PATH_SELECT': os.getenv('BMU_PATH_SELECT'), 'count': count })
+              'BMU_PATH_SELECT': os.getenv('BMU_PATH_SELECT'), 'count': count, 'errors': error_list })
 
 
 if __name__ == "__main__":

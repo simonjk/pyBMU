@@ -86,7 +86,7 @@ class ScanFiles:
     def scan_for_files(self):
         cursor = self.cursor
         sql_dirs = 'Select PATH from DIRECTORY where BACKUPGROUP_ID = %s'
-        sql_insert_bu = 'INSERT INTO BACKUPITEMS (RUN_ID, PATH, FILESIZE, LASTMODIFIED) VALUES (%s, %s, %s, %s)'
+        sql_insert_bu = 'INSERT INTO BACKUPITEMS (RUN_ID, PATH, FILESIZE, LASTMODIFIED, BACKUPGROUP_ID) VALUES (%s, %s, %s, %s, %s)'
 
         # ---------------- Get Rlevant Base Dirs
         try:
@@ -109,11 +109,10 @@ class ScanFiles:
             for root, dirs, files in os.walk(dir['PATH']):
                 for file in files:
                     filesperdir += 1
+                    new_hash = ""
 
                     if filesperdir%1000 == 0:
                         cursor = self.new_connection()
-
-
 
                     try:
                         filedata = {}
@@ -136,7 +135,184 @@ class ScanFiles:
                             continue
 
                         totalfiles += 1
-                        cursor.execute(sql_insert_bu, (self.run_id, filedata['filepath'], filedata['size'], filedata['mtime']))
+                        cursor.execute(sql_insert_bu, (self.run_id, filedata['filepath'], filedata['size'],
+                                                       filedata['mtime'], self.backup_group))
+
+                        new_id = cursor.lastrowid
+
+                        # check if file is unchanges
+
+                        sql_updateunchanged = """
+                                           Update BACKUPITEMS t
+                                           inner join
+                                           BACKUPITEMS as n
+                                           on  t.id = n.id
+                                           inner join BACKUPITEMS as c
+                                           on c.path = n.path and c.FILESIZE = n.FILESIZE
+                                           and c.lastmodified = n.lastmodified
+                                           inner join (select max(id) as id from BACKUPITEMS where path = %s and hash is not null) x
+                                           on c.id = x.id
+                                           SET t.item_id = c.item_id, t.hash=c.hash
+                                           where n.id = %s
+                                       """
+                        affected_rows = cursor.execute(sql_updateunchanged, (filedata['filepath'], new_id))
+
+                        sql_insertitems = """
+                                        Insert into ITEMS(backupgroup_id, hash) VALUES (%s, %s)
+                                                           """
+
+                        if affected_rows > 0:
+                            self.log.debug({'action': 'Unchanged File', 'path': filedata['filepath'],
+                                           'run_id': self.run_id, 'backup_group': self.backup_group,
+                                           'count': affected_rows})
+                        else:
+                            # set hash and create item where necesarry                            #
+                            sql_sethash = 'UPDATE BACKUPITEMS SET HASH = %s WHERE id = %s'
+                            new_hash = self.file_helper.hash_file(filedata['filepath'])
+                            cursor.execute(sql_sethash, (new_hash, new_id))
+                            sql_matchwithitems = """
+                                     UPDATE BACKUPITEMS t
+                                     inner join BACKUPITEMS b
+                                     on t.id = b.id
+                                     inner join ITEMS i
+                                     on i.hash = b.hash
+                                     SET b.ITEM_ID = i.id
+                                     where b.id = %s and i.backupgroup_id = %s
+                                 """
+                            matched = cursor.execute(sql_matchwithitems, (new_id, self.backup_group))
+                            if matched == 0:
+
+                                inserted = cursor.execute(sql_insertitems, (self.backup_group, new_hash))
+                                matched = cursor.execute(sql_matchwithitems, (new_id, self.backup_group))
+
+                                sql_check_buffer_status = "SELECT BUFFER_STATUS FROM ITEMS I where hash = %s and backupgroup_id = %s"
+                                sql_update_buffer_status = "Update ITEMS Set BUFFER_STATUS=%s where hash = %s and backupgroup_id = %s"
+                                sql_check_hash_exists = "select count(*) as count, max(id) as item_id from ITEMS where hash = %s and backupgroup_id = %s"
+                                sql_updatebuitem = 'update BACKUPITEMS  set item_id  = %s, hash = %s where id = %s '
+
+                                # print('[%s | %s]' % (new_hash, self.backup_group))
+                                cursor.execute(sql_check_buffer_status, (new_hash, self.backup_group))
+                                rs = cursor.fetchone()
+                                # print(rs)
+                                if rs["BUFFER_STATUS"] <= 0:
+
+                                    # Build Target Path
+                                    bufferpath = self.file_helper.buffer_path_from_hash(new_hash, self.backup_group)
+                                    self.file_helper.create_parent_if_not_exist(bufferpath)
+
+                                    # Copy File
+                                    self.file_helper.copy_file(filedata['filepath'],bufferpath)
+
+                                    # Validate Hash
+                                    tgt_hash = self.file_helper.hash_file(bufferpath)
+
+                                    if tgt_hash == new_hash:
+                                        # Set Bufferstatus to 1
+                                        cursor.execute(sql_update_buffer_status, (1, new_hash, self.backup_group))
+                                        self.log.info({'action': 'File Buffered Successfully', 'path': filedata['filepath'],
+                                                       'run_id': self.run_id, 'backup_group': self.backup_group,
+                                                       'count': affected_rows, 'hash': new_hash, 'backup item': new_id})
+
+                                    else:
+                                        # hash original again
+                                        src_hash = self.file_helper.hash_file(filedata['filepath'])
+
+                                        if src_hash != tgt_hash:
+                                            # delete target and  set buffer code to -1
+                                            self.file_helper.delete_file(bufferpath)
+                                            cursor.execute(sql_update_buffer_status, (-1, new_hash, self.backup_group))
+                                            self.log.info(
+                                                {'action': 'Could not Buffer: Fast Changing', 'path': filedata['filepath'],
+                                                 'run_id': self.run_id, 'backup_group': self.backup_group,
+                                                 'count': affected_rows, 'hash': new_hash, 'backup item': new_id})
+                                        else:
+                                            # Check if entry for new Hash exists
+                                            cursor.execute(sql_check_hash_exists, (tgt_hash, self.backup_group))
+                                            rs2 = cursor.fetchone()
+                                            if rs2["count"] == 0:
+                                                # set orig Item Entry to -2
+                                                cursor.execute(sql_update_buffer_status, (-2, new_hash, self.backup_group))
+                                                # create items entry
+                                                cursor.execute(sql_insertitems, (self.backup_group, tgt_hash))
+                                                # move file
+                                                tgtpath2 = self.file_helper.buffer_path_from_hash(tgt_hash, self.backup_group)
+                                                self.file_helper.create_parent_if_not_exist(tgtpath2)
+                                                self.file_helper.move_file(bufferpath, tgtpath2)
+                                                moved_hash = self.file_helper.hash_file(tgtpath2)
+                                                if tgt_hash == moved_hash:
+                                                    # update BUI with new item and set buffer_status = 1
+                                                    cursor.execute(sql_updatebuitem, (rs2["item_id"], tgt_hash, new_id))
+                                                    cursor.execute(sql_update_buffer_status, (1, tgt_hash, self.backup_group))
+                                                    self.log.info({'action': 'File Buffered Successfully but in Changed Version',
+                                                                   'path': filedata['filepath'],
+                                                                   'run_id': self.run_id,
+                                                                   'backup_group': self.backup_group,
+                                                                   'count': affected_rows, 'hash': tgt_hash, 'old hash': new_hash,
+                                                                   'backup item': new_id})
+                                                else:
+                                                    #Delete file and update  item bufferstatus -4
+                                                    self.file_helper.delete_file(tgtpath2)
+                                                    cursor.execute(sql_update_buffer_status, (-4, new_hash, self.backup_group))
+                                                    self.log.info(
+                                                        {'action': 'Could not Buffer: Changed and Fast Changing',
+                                                         'path': filedata['filepath'],
+                                                         'run_id': self.run_id, 'backup_group': self.backup_group,
+                                                         'count': affected_rows, 'hash': new_hash,
+                                                         'backup item': new_id})
+                                            else:
+                                                cursor.execute(sql_check_buffer_status, (tgt_hash, self.backup_group))
+                                                rs3 = cursor.fetchone()
+                                                if rs3["BUFFER_STATUS"] > 0:
+                                                    # delete target and change bui entry
+                                                    self.file_helper.delete_file(bufferpath)
+                                                    cursor.execute(sql_updatebuitem, (rs2["item_id"], tgt_hash, new_id))
+                                                    cursor.execute(sql_update_buffer_status,
+                                                                   (1, tgt_hash, self.backup_group))
+                                                    self.log.info(
+                                                        {'action': 'File Buffered Successfully Changed Version already in Buffer',
+                                                         'path': filedata['filepath'],
+                                                         'run_id': self.run_id,
+                                                         'backup_group': self.backup_group,
+                                                         'count': affected_rows, 'hash': tgt_hash, 'old hash': new_hash,
+                                                         'backup item': new_id})
+                                                else:
+                                                    # move target
+                                                    tgtpath2 = self.file_helper.buffer_path_from_hash(tgt_hash,
+                                                                                                      self.backup_group)
+                                                    self.file_helper.create_parent_if_not_exist(tgtpath2)
+                                                    self.file_helper.move_file(bufferpath, tgtpath2)
+                                                    moved_hash = self.file_helper.hash_file(tgtpath2)
+                                                    # validate new target
+                                                    if tgt_hash == moved_hash:
+                                                        cursor.execute(sql_updatebuitem, (rs2["item_id"], tgt_hash, new_id))
+                                                        self.log.info(
+                                                            {
+                                                                'action': 'File Buffered Successfully Changed Version in existing Item',
+                                                                'path': filedata['filepath'],
+                                                                'run_id': self.run_id,
+                                                                'backup_group': self.backup_group,
+                                                                'count': affected_rows, 'hash': tgt_hash,
+                                                                'old hash': new_hash,
+                                                                'backup item': new_id})
+                                                    else:
+                                                        # Delete target and set buffer status -3
+                                                        self.file_helper.delete_file(tgtpath2)
+                                                        cursor.execute(sql_update_buffer_status,
+                                                                       (-3, new_hash, self.backup_group))
+                                                        self.log.info(
+                                                            {'action': 'Could not Buffer: Fast Changing in existing item',
+                                                             'path': filedata['filepath'],
+                                                             'run_id': self.run_id, 'backup_group': self.backup_group,
+                                                             'count': affected_rows, 'hash': new_hash,
+                                                             'backup item': new_id})
+                                else:
+                                    self.log.info({'action': 'File already Buffered', 'path': filedata['filepath'],
+                                                   'run_id': self.run_id, 'backup_group': self.backup_group,
+                                                   'count': affected_rows, 'hash': new_hash, 'backup item': new_id})
+                            else:
+                                self.log.info({'action': 'File Unchanged', 'path': filedata['filepath'],
+                                               'run_id': self.run_id, 'backup_group': self.backup_group,
+                                               'count': affected_rows, 'hash': new_hash})
 
                     except Exception as e:
                         cursor = self.new_connection()
@@ -162,132 +338,17 @@ class ScanFiles:
         self.log.info({'action': 'End scanning Dirs', 'run_id': self.run_id, 'backup_group': self.backup_group,
                         'count': totalfiles})
 
-        # ---------------- set Item ID and Hash for Unchanged
-        cursor = self.new_connection()
-        sql_updateunchanged = """
-                    Update BACKUPITEMS t
-                    inner join
-                    BACKUPITEMS as n
-                    on  t.id = n.id
-                    inner join BACKUPITEMS as c
-                    on c.path = n.path and c.FILESIZE = n.FILESIZE and c.lastmodified = n.lastmodified
-                    inner join NEWESTBU x
-                    on c.id = x.id
-                    SET t.item_id = c.item_id, t.hash=c.hash
-                    where x.backupgroup_id = %s and n.run_id = %s
-                """
 
-        try:
-            affected_rows = cursor.execute(sql_updateunchanged, (self.backup_group, self.run_id))
-            self.log.info({'action': 'Updated Unchanged', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                           'count': affected_rows})
-
-        except Exception as e:
-            print("Exception")  # sql error
-            print(e)
-            tb = e.__traceback__
-            traceback.print_tb(tb)
-
-        # ------------------ Hash unknown
-        cursor = self.new_connection()
-        sql_getunhashed = 'Select * from BACKUPITEMS where run_id = %s and item_id is null'
-        sql_sethash = 'UPDATE BACKUPITEMS SET HASH = %s WHERE id = %s'
-        sql_matchwithitems = """
-            UPDATE BACKUPITEMS t
-            inner join BACKUPITEMS b
-            on t.id = b.id
-            inner join ITEMS i
-            on i.hash = b.hash
-            SET b.ITEM_ID = i.id
-            where i.backupgroup_id = %s and (b.ITEM_ID is null or b.ITEM_ID = 0)
-        """
-        sql_insertitems = """
-            Insert into ITEMS(backupgroup_id, hash)
-            SELECT %s as backupgroup_id, hash from BACKUPITEMS
-            where run_id = %s and (ITEM_ID is null or ITEM_ID = 0) and not HASH is null
-        """
-        try:
-            cursor.execute(sql_getunhashed,(self.run_id))
-            unhashed = cursor.fetchall()
-            to_hash = len(unhashed)
-            hashed = 0
-            self.log.info({'action': 'Start Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                           'count': to_hash})
-            started = int(round(time.time() * 1000))
-            for bui in unhashed:
-
-                hash = self.file_helper.hash_file(bui["PATH"])
-                cursor.execute(sql_sethash,(hash, bui['ID'] ))
-                hashed += 1
-                if hashed%1000 == 0:
-                    self.log.info(
-                        {'action': 'Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                         'count': hashed, 'total': to_hash})
-
-            finished = int(round(time.time() * 1000))
-            duration = finished - started
-            divider = 1
-            if hashed > 0:
-                divider = hashed
-            per_file = duration / divider
-            self.log.info(
-                {'action': 'Finished Hashing', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': hashed, 'duration': duration, 'per_file': per_file, 'total': to_hash})
-
-            matched = cursor.execute(sql_matchwithitems, (self.backup_group))
-            self.log.info(
-                {'action': 'Matched Existing Hashes', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': matched})
-
-
-            inserted = cursor.execute(sql_insertitems,(self.backup_group, self.run_id))
-            self.log.info(
-                {'action': 'Inserted new Hashes', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': inserted})
-
-            matched = cursor.execute(sql_matchwithitems, (self.backup_group))
-            self.log.info(
-                {'action': 'Matched new Hashes', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': matched})
-
-
-
-
-        except Exception as e:
-            print("Exception")  # sql error
-            print(e)
-            tb = e.__traceback__
-            traceback.print_tb(tb)
-
-        # ------------------ SET Hashing Complete and recreate NEWESTBU
+        # ------------------ SET Hashing Complete
         cursor = self.new_connection()
         sql_sethashingsuccess = 'UPDATE RUNS SET SUCESSFUL = 1 WHERE ID = %s'
-        sql_truncatenewestbu = 'truncate table NEWESTBU'
-        sql_recreatenewestbu = """
-            INSERT INTO NEWESTBU
-            SELECT max(b.id) as id, r.backupgroup_id FROM BACKUPITEMS b
-            inner join RUNS r
-            on r.id = b.run_id
-            where not b.hash is null
-            group by r.backupgroup_id, path
-            """
+
         try:
             cursor.execute(sql_sethashingsuccess,(self.run_id))
             self.log.info(
                 {'action': 'Scanning and Hashing successful', 'run_id': self.run_id, 'backup_group': self.backup_group}
             )
-            started = int(round(time.time() * 1000))
-            cursor.execute(sql_truncatenewestbu)
-            self.log.info(
-                {'action': 'NEWESTBU truncated', 'run_id': self.run_id, 'backup_group': self.backup_group}
-            )
 
-            inserted = cursor.execute(sql_recreatenewestbu)
-            finished = int(round(time.time() * 1000))
-            duration = finished - started
-            self.log.info(
-                {'action': 'Recreated NEWESTBU', 'run_id': self.run_id, 'backup_group': self.backup_group,
-                 'count': inserted, 'duration': duration})
 
 
         except Exception as e:

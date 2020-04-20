@@ -15,6 +15,13 @@ class FileHelper():
         # print("Remaining Space in %s is %s" % (path, free))
         return free
 
+    def buffer_path_from_hash(self, hash, backup_group):
+        reserved = ['com1','com2','com3','com4','com5','com6','com7','com8','com9','lpt1','lpt2','lpt3','lpt4','lpt5','lpt6','lpt7','lpt8','lpt9']
+        fourset = hash[:4]
+        if fourset in reserved:
+            fourset = fourset + '_'
+        return os.getenv('BMU_BUFFER') + '/' + "bg" + str(backup_group).zfill(3) + '/' + hash[:2] + '/' + fourset + '/' + hash[:6] + '/' + hash[:8] + '/' + hash
+
     def path_from_hash(self, root, drive, hash):
         reserved = ['com1','com2','com3','com4','com5','com6','com7','com8','com9','lpt1','lpt2','lpt3','lpt4','lpt5','lpt6','lpt7','lpt8','lpt9']
         fourset = hash[:4]

@@ -3,6 +3,7 @@ import sys
 import traceback
 import re
 import time
+import warnings
 
 from dbhelper import DBHelper
 from filehelper import FileHelper
@@ -86,7 +87,13 @@ class ScanFiles:
     def scan_for_files(self):
         cursor = self.cursor
         sql_dirs = 'Select PATH from DIRECTORY where BACKUPGROUP_ID = %s'
-        sql_insert_bu = 'INSERT INTO BACKUPITEMS (RUN_ID, PATH, FILESIZE, LASTMODIFIED, BACKUPGROUP_ID) VALUES (%s, %s, %s, %s, %s)'
+        sql_insert_file = 'INSERT IGNORE INTO FILES (backupgroup_id, path, path_hash) ' \
+                          'VALUES (%s, %s, md5(concat(%s, "-", %s)))'
+        sql_insert_bu = """
+        INSERT INTO BACKUPITEMS (RUN_ID, FILE_ID, FILESIZE, LASTMODIFIED, BACKUPGROUP_ID)
+        Select %s, id, %s, %s, %s
+        from FILES where path_hash = md5(concat(%s, '-', %s))
+        """
 
         # ---------------- Get Rlevant Base Dirs
         try:
@@ -135,8 +142,13 @@ class ScanFiles:
                             continue
 
                         totalfiles += 1
-                        cursor.execute(sql_insert_bu, (self.run_id, filedata['filepath'], filedata['size'],
-                                                       filedata['mtime'], self.backup_group))
+                        with warnings.catch_warnings():
+                            warnings.simplefilter("ignore")
+                            cursor.execute(sql_insert_file, (self.backup_group, filedata['filepath'],
+                                                         self.backup_group, filedata['filepath']))
+                        cursor.execute(sql_insert_bu, (self.run_id, filedata['size'],
+                                                       filedata['mtime'], self.backup_group,
+                                                       self.backup_group, filedata['filepath']))
 
                         new_id = cursor.lastrowid
 
@@ -148,14 +160,18 @@ class ScanFiles:
                                            BACKUPITEMS as n
                                            on  t.id = n.id
                                            inner join BACKUPITEMS as c
-                                           on c.path = n.path and c.FILESIZE = n.FILESIZE
+                                           on c.file_id = n.file_id and c.FILESIZE = n.FILESIZE
                                            and c.lastmodified = n.lastmodified
-                                           inner join (select max(id) as id from BACKUPITEMS where path = %s and hash is not null) x
+                                           inner join (select max(id) as id from BACKUPITEMS
+                                           where file_id =
+                                              (Select id from FILES where path_hash = md5(concat(%s, '-', %s)))
+                                           and hash is not null) x
                                            on c.id = x.id
                                            SET t.item_id = c.item_id, t.hash=c.hash
                                            where n.id = %s
                                        """
-                        affected_rows = cursor.execute(sql_updateunchanged, (filedata['filepath'], new_id))
+                        affected_rows = cursor.execute(sql_updateunchanged, (self.backup_group, filedata['filepath'],
+                                                                             new_id))
 
                         sql_insertitems = """
                                         Insert into ITEMS(backupgroup_id, hash) VALUES (%s, %s)
@@ -163,7 +179,7 @@ class ScanFiles:
 
                         if affected_rows > 0:
                             self.log.debug({'action': 'Unchanged File', 'path': filedata['filepath'],
-                                           'run_id': self.run_id, 'backup_group': self.backup_group,
+                                            'run_id': self.run_id, 'backup_group': self.backup_group,
                                            'count': affected_rows})
                         else:
                             # set hash and create item where necesarry                            #
@@ -363,88 +379,11 @@ class ScanFiles:
         self.cursor = self.db_data["cursor"]
         return self.cursor
 
-    @staticmethod
-    def temp_rehash(run_id, backup_group):
-        db_helper = DBHelper()
-        db_data = db_helper.getDictCursor()
-        cursor = db_data["cursor"]
-        file_helper = FileHelper()
-        log_helper = LogHelper()
-        log = log_helper.getLogger()
-        # ------------------ Hash unknown
-        sql_getunhashed = 'Select * from BACKUPITEMS where run_id = %s and item_id is null'
-        sql_sethash = 'UPDATE BACKUPITEMS SET HASH = %s WHERE id = %s'
-        sql_matchwithitems = """
-                    UPDATE BACKUPITEMS t
-                    inner join BACKUPITEMS b
-                    on t.id = b.id
-                    inner join ITEMS i
-                    on i.hash = b.hash
-                    SET b.ITEM_ID = i.id
-                    where i.backupgroup_id = %s and (b.ITEM_ID is null or b.ITEM_ID = 0)
-                """
-        sql_insertitems = """
-                    Insert into ITEMS(backupgroup_id, hash)
-                    SELECT %s as backupgroup_id, hash from BACKUPITEMS
-                    where run_id = %s and (ITEM_ID is null or ITEM_ID = 0) and not HASH is null
-                """
-        try:
-            cursor.execute(sql_getunhashed, (run_id))
-            unhashed = cursor.fetchall()
-            to_hash = len(unhashed)
-            hashed = 0
-            log.info({'action': 'Start Hashing', 'run_id': run_id, 'backup_group': backup_group,
-                           'count': to_hash})
-            started = int(round(time.time() * 1000))
-            for bui in unhashed:
-
-                hash = file_helper.hash_file(bui["PATH"])
-                cursor.execute(sql_sethash, (hash, bui['ID']))
-                hashed += 1
-                if hashed % 1000 == 0:
-                    log.info(
-                        {'action': 'Hashing', 'run_id': run_id, 'backup_group': backup_group,
-                         'count': hashed, 'total': to_hash})
-
-            finished = int(round(time.time() * 1000))
-            duration = finished - started
-            divider = 1
-            if hashed > 0:
-                divider = hashed
-            per_file = duration / divider
-            log.info(
-                {'action': 'Finished Hashing', 'run_id': run_id, 'backup_group': backup_group,
-                 'count': hashed, 'duration': duration, 'per_file': per_file, 'total': to_hash})
-
-            matched = cursor.execute(sql_matchwithitems, (backup_group))
-            log.info(
-                {'action': 'Matched Existing Hashes', 'run_id': run_id, 'backup_group': backup_group,
-                 'count': matched})
-
-            inserted = cursor.execute(sql_insertitems, (backup_group, run_id))
-            log.info(
-                {'action': 'Inserted new Hashes', 'run_id': run_id, 'backup_group': backup_group,
-                 'count': inserted})
-
-            matched = cursor.execute(sql_matchwithitems, (backup_group))
-            log.info(
-                {'action': 'Matched new Hashes', 'run_id': run_id, 'backup_group': backup_group,
-                 'count': matched})
-
-
-
-
-        except Exception as e:
-            print("Exception")  # sql error
-            print(e)
-            tb = e.__traceback__
-            traceback.print_tb(tb)
-
 
 def main():
     scan_files = ScanFiles(int(sys.argv[1]))
     scan_files.scan_for_files()
-    #ScanFiles.temp_rehash(1804, 3)
+
 
 if __name__ == "__main__":
         main()

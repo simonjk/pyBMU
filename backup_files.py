@@ -103,7 +103,7 @@ class BackupFiles:
         if external:
             tracking_field = 'DRIVE2_ID'
         sql_getfilesforrun = """
-        Select b.id as bui_id, b.run_id as run_id, b.item_ID as item_id, b.path as path, i.hash as hash,
+        Select b.id as bui_id, b.run_id as run_id, b.item_ID as item_id, f.path as path, i.hash as hash,
             b.filesize as filesize, b.lastmodified as lastmodified,
             i.drive1_id as drive1_id, i.drive2_id as drive2_id, i.buffer_status
             from BACKUPITEMS b
@@ -111,6 +111,8 @@ class BackupFiles:
             on (b.item_id = i.id)
             inner join RUNS r
             on b.run_id = r.id
+            inner join FILES f
+            on f.id =b.file_id
             where (i.%s is null or i.%s = 0)
             and i.buffer_status = 1
             and i.backupgroup_id = %s

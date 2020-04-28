@@ -9,7 +9,8 @@ from loghelper import LogHelper
 
 
 # stati:
-# -1 New Hash Source not Matching Target
+# -1 hash changed
+# -2 invalid buffer hash
 # -9 Could not copy File
 # -12 new hash in external run set for internal to prevent loop
 # -99 manual set for not saved without bui link
@@ -62,46 +63,27 @@ class BackupFiles:
                 logger.info("Skipping File to big for remaining Space : %s" % file_to_save)
                 continue
             target = filehelper.path_from_hash(drivepath, drive_info["name"], file_to_save["hash"])
+            source = filehelper.buffer_path_from_hash(file_to_save["hash"], backupgroup_id)
             logger.info("Copying File: %s" % file_to_save)
-            if not filehelper.copy_file(file_to_save["path"], target):
-                logger.error("Could not copy File %s to %s [%s]" % (file_to_save["path"], target, file_to_save))
+            if not filehelper.copy_file(source, target):
+                logger.error("Could not copy File %s to %s [%s]" % (source, target, file_to_save))
                 self.mark_item(backupgroup_id, file_to_save["hash"], external, -9)
                 continue
             hash_tgt = filehelper.hash_file(target)
             if hash_tgt != file_to_save["hash"]:
                 logger.error("Hash not Matching %s : %s != %s" % (target, hash_tgt, file_to_save))
-                hash_src_new = filehelper.hash_file(file_to_save["path"])
-                if hash_tgt != hash_src_new:
+                hash_src_new = filehelper.hash_file(source)
+                if file_to_save["hash"] == hash_src_new:
                     filehelper.delete_file(target)
                     self.mark_item(backupgroup_id, file_to_save["hash"], external, -1)
-                    logger.error("New Hash Source not Matching Target %s : %s != %s" % (target, hash_tgt, hash_src_new))
+                    logger.error("File changed during copying from buffer %s : %s != %s" % (target, hash_tgt, hash_src_new))
                     continue
                 else:
-                    new_hash_id = self.is_hash_known(hash_tgt, backupgroup_id)
-                    new_target = filehelper.path_from_hash(drivepath, drive_info["name"], hash_tgt)
-                    if new_hash_id == 0:
-                        self.create_item(backupgroup_id, hash_tgt, external, drive_info["id"])
-                        new_item_id = self.is_hash_known(hash_tgt, backupgroup_id)
-                        self.change_item_in_bui(file_to_save["bui_id"],new_item_id, hash_tgt)
-                        filehelper.move_file(target, new_target)
-                        logger.info(
-                            "New Hash Source Changed and was not known. New Item Created and BUI adjusted %s : %s "
-                            % (target, hash_tgt))
-                    else:
-                        if os.path.isfile(new_target):
-                            filehelper.delete_file(target)
-                            self.change_item_in_bui(file_to_save["bui_id"], new_hash_id, hash_tgt)
-                            logger.info(
-                                "New Hash Source Changed. Backup for new Hash already existed %s : %s "
-                                % (target, hash_tgt))
-                            continue
-                        else:
-                            filehelper.move_file(target, new_target)
-                            self.mark_item(backupgroup_id, hash_tgt, external, drive_info["id"])
-                            self.change_item_in_bui(file_to_save["bui_id"], new_hash_id, hash_tgt)
-                            logger.info(
-                                "New Hash Source Changed. Backup for new Hash moved %s : %s "
-                                % (target, hash_tgt))
+                    filehelper.delete_file(target)
+                    self.mark_item(backupgroup_id, file_to_save["hash"], external, -2)
+                    logger.error(
+                        "Bufferd File does not produce correct hash %s : %s != %s" % (target, hash_tgt, hash_src_new))
+                    continue
             else:
                 self.mark_item(backupgroup_id, file_to_save["hash"], external, drive_info["id"])
                 logger.info(
@@ -121,15 +103,18 @@ class BackupFiles:
         if external:
             tracking_field = 'DRIVE2_ID'
         sql_getfilesforrun = """
-        Select b.id as bui_id, b.run_id as run_id, b.item_ID as item_id, b.path as path, i.hash as hash,
+        Select b.id as bui_id, b.run_id as run_id, b.item_ID as item_id, f.path as path, i.hash as hash,
             b.filesize as filesize, b.lastmodified as lastmodified,
-            i.drive1_id as drive1_id, i.drive2_id as drive2_id
+            i.drive1_id as drive1_id, i.drive2_id as drive2_id, i.buffer_status
             from BACKUPITEMS b
             inner join ITEMS i
             on (b.item_id = i.id)
             inner join RUNS r
             on b.run_id = r.id
+            inner join FILES f
+            on f.id =b.file_id
             where (i.%s is null or i.%s = 0)
+            and i.buffer_status = 1
             and i.backupgroup_id = %s
             and (r.all_saved is null or r.all_saved != 1)
             and (b.id, b.item_id) in (
@@ -187,9 +172,8 @@ class BackupFiles:
         on i.id = bu.ITEM_id
         where
         i.backupgroup_id = %s and (i.DRIVE1_ID = %s or i.DRIVE2_ID = %s)
-        and bu.id in (select id from NEWESTBU where backupgroup_id = %s)
         group by i.hash) x
-        """ % (drive_info["group_id"], drive_info["id"], drive_info["id"], drive_info["group_id"])
+        """ % (drive_info["group_id"], drive_info["id"], drive_info["id"])
         # print(sql_getusedspace)
 
         try:
@@ -330,8 +314,10 @@ class BackupFiles:
 def main():
     backup_files = BackupFiles()
     backup_group = int(sys.argv[1])
-    # backup_files.backup_files(backup_group, False)
-    backup_files.backup_files(backup_group, True)
+    external = False
+    if sys.argv[2] == 'E':
+        external = True
+    backup_files.backup_files(backup_group, external)
     backup_files.close_finished_runs()
 
 

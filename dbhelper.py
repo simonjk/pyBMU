@@ -5,7 +5,7 @@ class DBHelper():
     def getDictCursor(self):
         # Open database connection
         db = pymysql.connect(os.getenv('BMU_DB_HOST'), os.getenv('BMU_DB_USR'), os.getenv('BMU_DB_PWD'),
-                             os.getenv('BMU_DB_NAME'))
+                             os.getenv('BMU_DB_NAME'), use_unicode=True, charset="utf8mb4")
         db.autocommit(True)
 
         # prepare a cursor object using cursor() method
@@ -16,7 +16,7 @@ class DBHelper():
     def getTestDictCursor(self):
         # Open database connection
         db = pymysql.connect(os.getenv('BMU_TST_DB_HOST'), os.getenv('BMU_TST_DB_USR'), os.getenv('BMU_TST_DB_PWD'),
-                             os.getenv('BMU_TST_DB_NAME'))
+                             os.getenv('BMU_TST_DB_NAME'), use_unicode=True, charset="utf8mb4")
 
         db.autocommit(True)
         # prepare a cursor object using cursor() method
@@ -27,7 +27,7 @@ class DBHelper():
     def getCursor(self):
         # Open database connection
         db = pymysql.connect(os.getenv('BMU_DB_HOST'), os.getenv('BMU_DB_USR'), os.getenv('BMU_DB_PWD'),
-                             os.getenv('BMU_DB_NAME'))
+                             os.getenv('BMU_DB_NAME'), use_unicode=True, charset="utf8mb4")
 
         db.autocommit(True)
         # prepare a cursor object using cursor() method

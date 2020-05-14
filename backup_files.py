@@ -109,7 +109,7 @@ class BackupFiles:
                 logger.info({'action': 'Backup File Successful', 'backup_group': backupgroup_id,
                              'external': external, 'file_to_backup': file_to_save, 'hash_target': hash_tgt,
                              'target': target})
-                files_saved = file_to_save+1
+                files_saved += 1
 
             free_quota = free_quota - file_to_save["filesize"]
             free_disk_space = filehelper.freespace(drivepath)

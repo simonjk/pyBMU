@@ -38,20 +38,29 @@ class BackupFiles:
         else:
             drivepath = self.drivepathinternal
 
-        logger.info("Starting Backuping Files Backupgroup: %s External: %s" % (backupgroup_id, external))
+
 
         drive_info = self.get_drive(backupgroup_id, external)
 
-        logger.info("Drive Info: %s" % drive_info)
+        logger.info({'action': 'Starting Backuping Files',  'backup_group': backupgroup_id,
+                           'external': external, 'Drive Info': drive_info})
 
         free_disk_space, free_quota = self.get_free_space(drive_info, drivepath)
-        logger.info("Free Space: %s Free Quota: %s" % (free_disk_space, free_quota))
+        logger.info({'action': 'Free Space', 'backup_group': backupgroup_id,
+                     'external': external, 'Drive Info': drive_info, 'free_quota': free_quota,
+                     'free_space': free_disk_space})
 
         if free_disk_space <= 0 or free_quota <= 0:
-            logger.warn("Disk Full, Aborting")
+            logger.warn({'action': 'Disk Full, Aborting', 'backup_group': backupgroup_id,
+                         'external': external, 'Drive Info': drive_info, 'free_quota': free_quota,
+                         'free_space': free_disk_space})
             return
         files_to_save = self.get_filestosave(backupgroup_id, external)
-        logger.info("Files to Backup: %s" % len(files_to_save))
+        total_files = len(files_to_save)
+        files_saved = 0
+        logger.info({'action': 'Files To backup', 'backup_group': backupgroup_id,
+                     'external': external, 'files_to_backup': total_files})
+
         for file_to_save in files_to_save:
             # # temporaray code for testing
             #
@@ -60,38 +69,56 @@ class BackupFiles:
             #    continue
             # # End of Temporary Code
             if free_disk_space < file_to_save["filesize"] or free_quota < file_to_save["filesize"]:
-                logger.info("Skipping File to big for remaining Space : %s" % file_to_save)
+                logger.info({'action': 'Skipping File to big for remaining Space', 'backup_group': backupgroup_id,
+                             'external': external, 'file_to_backup': file_to_save})
                 continue
             target = filehelper.path_from_hash(drivepath, drive_info["name"], file_to_save["hash"])
             source = filehelper.buffer_path_from_hash(file_to_save["hash"], backupgroup_id)
-            logger.info("Copying File: %s" % file_to_save)
+
+            logger.info({'action': 'Copying File', 'backup_group': backupgroup_id,
+                         'external': external, 'file_to_backup': file_to_save})
             if not filehelper.copy_file(source, target):
-                logger.error("Could not copy File %s to %s [%s]" % (source, target, file_to_save))
+                logger.error({'action': 'Copying File', 'backup_group': backupgroup_id,
+                             'external': external, 'file_to_backup': file_to_save, 'source': source, 'target': target})
                 self.mark_item(backupgroup_id, file_to_save["hash"], external, -9)
                 continue
             hash_tgt = filehelper.hash_file(target)
             if hash_tgt != file_to_save["hash"]:
-                logger.error("Hash not Matching %s : %s != %s" % (target, hash_tgt, file_to_save))
+                logger.error({'action': 'Hash not Matching', 'backup_group': backupgroup_id,
+                              'external': external, 'file_to_backup': file_to_save, 'hash_target': hash_tgt,
+                              'target': target})
                 hash_src_new = filehelper.hash_file(source)
                 if file_to_save["hash"] == hash_src_new:
                     filehelper.delete_file(target)
                     self.mark_item(backupgroup_id, file_to_save["hash"], external, -1)
                     logger.error("File changed during copying from buffer %s : %s != %s" % (target, hash_tgt, hash_src_new))
+                    logger.error({'action': 'File changed during copying from buffer', 'backup_group': backupgroup_id,
+                                  'external': external, 'file_to_backup': file_to_save, 'hash_target': hash_tgt,
+                                  'target': target, 'hash_src_new': hash_src_new})
                     continue
                 else:
                     filehelper.delete_file(target)
                     self.mark_item(backupgroup_id, file_to_save["hash"], external, -2)
-                    logger.error(
-                        "Bufferd File does not produce correct hash %s : %s != %s" % (target, hash_tgt, hash_src_new))
+                    logger.error({'action': 'Buffered File does not produce correct hash',
+                                  'backup_group': backupgroup_id, 'external': external,
+                                  'file_to_backup': file_to_save, 'hash_target': hash_tgt,
+                                  'target': target, 'hash_src_new': hash_src_new})
                     continue
             else:
                 self.mark_item(backupgroup_id, file_to_save["hash"], external, drive_info["id"])
-                logger.info(
-                    "Backup Successful %s : %s "
-                    % (target, hash_tgt))
+                logger.info({'action': 'Backup File Successful', 'backup_group': backupgroup_id,
+                             'external': external, 'file_to_backup': file_to_save, 'hash_target': hash_tgt,
+                             'target': target})
+                files_saved = file_to_save+1
+
             free_quota = free_quota - file_to_save["filesize"]
             free_disk_space = filehelper.freespace(drivepath)
-            logger.info(" Remaining Free Space: %s Free Quota: %s" % (free_disk_space, free_quota))
+            logger.info({'action': 'Remaining Free Space', 'backup_group': backupgroup_id,
+                         'external': external, 'Drive Info': drive_info, 'free_quota': free_quota,
+                         'free_space': free_disk_space})
+        logger.info({'action': 'Finished Backup', 'backup_group': backupgroup_id,
+                     'external': external, 'Drive Info': drive_info, 'free_quota': free_quota,
+                     'free_space': free_disk_space, 'Files_To_Save': total_files, 'Files_Saved': files_saved})
 
 
 
@@ -301,6 +328,8 @@ class BackupFiles:
             for run in runs:
                 cursor.execute(sql_update_run, (run["count"], run["id"]))
                 logger.info("Saved Run %s with %s Errors" %( run["id"], run["count"]))
+                logger.info({'action': 'Saved Runs',
+                             'run_id':  run["id"], 'Errors': run["count"]})
 
         except Exception as e:
             print("Exception")  # sql error

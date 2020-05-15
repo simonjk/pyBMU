@@ -40,7 +40,7 @@ def main():
     print("Hash: %s" % a_hash)
     i_id = bf.is_hash_known(a_hash, 1)
     print("item_id before: %s" % i_id)
-    bf.create_item(1, a_hash, False, -99)
+    bf.create_item(1, a_hash, False, -99, 4711)
     i_id = bf.is_hash_known(a_hash, 1)
     print("item_id after: %s" % i_id)
     bf.mark_item(1, a_hash, True, -33)

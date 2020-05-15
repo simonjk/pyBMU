@@ -174,7 +174,7 @@ class ScanFiles:
                                                                              new_id))
 
                         sql_insertitems = """
-                                        Insert into ITEMS(backupgroup_id, hash) VALUES (%s, %s)
+                                        Insert into ITEMS(backupgroup_id, hash, filesize) VALUES (%s, %s, %s)
                                                            """
 
                         if affected_rows > 0:
@@ -198,7 +198,7 @@ class ScanFiles:
                             matched = cursor.execute(sql_matchwithitems, (new_id, self.backup_group))
                             if matched == 0:
 
-                                inserted = cursor.execute(sql_insertitems, (self.backup_group, new_hash))
+                                inserted = cursor.execute(sql_insertitems, (self.backup_group, new_hash, filedata['size']))
                                 matched = cursor.execute(sql_matchwithitems, (new_id, self.backup_group))
 
                                 sql_check_buffer_status = "SELECT BUFFER_STATUS FROM ITEMS I where hash = %s and backupgroup_id = %s"
@@ -249,7 +249,7 @@ class ScanFiles:
                                                 # set orig Item Entry to -2
                                                 cursor.execute(sql_update_buffer_status, (-2, new_hash, self.backup_group))
                                                 # create items entry
-                                                cursor.execute(sql_insertitems, (self.backup_group, tgt_hash))
+                                                cursor.execute(sql_insertitems, (self.backup_group, tgt_hash, os.stat(bufferpath).st_size))
                                                 # move file
                                                 tgtpath2 = self.file_helper.buffer_path_from_hash(tgt_hash, self.backup_group)
                                                 self.file_helper.create_parent_if_not_exist(tgtpath2)

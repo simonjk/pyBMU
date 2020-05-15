@@ -130,23 +130,13 @@ class BackupFiles:
         if external:
             tracking_field = 'DRIVE2_ID'
         sql_getfilesforrun = """
-        Select b.id as bui_id, b.run_id as run_id, b.item_ID as item_id, f.path as path, i.hash as hash,
-            b.filesize as filesize, b.lastmodified as lastmodified,
+        Select i.id as item_id, i.hash as hash,
+            i.filesize as filesize,
             i.drive1_id as drive1_id, i.drive2_id as drive2_id, i.buffer_status
-            from BACKUPITEMS b
-            inner join ITEMS i
-            on (b.item_id = i.id)
-            inner join RUNS r
-            on b.run_id = r.id
-            inner join FILES f
-            on f.id =b.file_id
+            from ITEMS i
             where (i.%s is null or i.%s = 0)
             and i.buffer_status = 1
             and i.backupgroup_id = %s
-            and (r.all_saved is null or r.all_saved != 1)
-            and (b.id, b.item_id) in (
-            SELECT max(id), item_id from BACKUPITEMS group by item_id
-            )
             order by filesize desc
         """ % (tracking_field, tracking_field, backupgroup_id)
 
@@ -194,9 +184,7 @@ class BackupFiles:
         disk = filehelper.freespace(drivepath)
         sql_getusedspace = """
         select sum(size) size from (
-        select max(filesize) as size, i.hash  from BACKUPITEMS bu
-        inner join ITEMS i
-        on i.id = bu.ITEM_id
+        select max(filesize) as size, i.hash  from ITEMS i
         where
         i.backupgroup_id = %s and (i.DRIVE1_ID = %s or i.DRIVE2_ID = %s)
         group by i.hash) x
@@ -274,14 +262,14 @@ class BackupFiles:
             tb = e.__traceback__
             traceback.print_tb(tb)
 
-    def create_item(self, bg_id, hash, external, status):
+    def create_item(self, bg_id, hash, external, status, size):
         tracking_field = 'DRIVE1_ID'
-        sql_insertitem = 'insert into ITEMS (backupgroup_id, hash, %s) values (%s, \'%s\', %s)' % \
-                         (tracking_field, bg_id, hash, status)
+        sql_insertitem = 'insert into ITEMS (backupgroup_id, hash, %s, filesize) values (%s, \'%s\', %s, %s)' % \
+                         (tracking_field, bg_id, hash, status, size)
         if external:
             tracking_field = 'DRIVE2_ID'
-            sql_insertitem = 'insert into ITEMS (backupgroup_id, hash, DRIVE1_ID, DRIVE2_ID) values (%s, \'%s\',  -12, %s)' % \
-                             (bg_id, hash, status)
+            sql_insertitem = 'insert into ITEMS (backupgroup_id, hash, DRIVE1_ID, DRIVE2_ID, filesize) values (%s, \'%s\',  -12, %s, %s)' % \
+                             (bg_id, hash, status, size)
         cursor = self.cursor
 
 

@@ -54,13 +54,13 @@ class BackupFiles:
             logger.warn({'action': 'Disk Full, Aborting', 'backup_group': backupgroup_id,
                          'external': external, 'Drive Info': drive_info, 'free_quota': free_quota,
                          'free_space': free_disk_space})
-            return
+            return drive_info["id"]
         files_to_save = self.get_filestosave(backupgroup_id, external)
         total_files = len(files_to_save)
         files_saved = 0
         logger.info({'action': 'Files To backup', 'backup_group': backupgroup_id,
                      'external': external, 'files_to_backup': total_files})
-
+        skip_big = 0
         for file_to_save in files_to_save:
             # # temporaray code for testing
             #
@@ -71,6 +71,7 @@ class BackupFiles:
             if free_disk_space < file_to_save["filesize"] or free_quota < file_to_save["filesize"]:
                 logger.info({'action': 'Skipping File to big for remaining Space', 'backup_group': backupgroup_id,
                              'external': external, 'file_to_backup': file_to_save})
+                skip_big += 1
                 continue
             target = filehelper.path_from_hash(drivepath, drive_info["name"], file_to_save["hash"])
             source = filehelper.buffer_path_from_hash(file_to_save["hash"], backupgroup_id)
@@ -119,6 +120,10 @@ class BackupFiles:
         logger.info({'action': 'Finished Backup', 'backup_group': backupgroup_id,
                      'external': external, 'Drive Info': drive_info, 'free_quota': free_quota,
                      'free_space': free_disk_space, 'Files_To_Save': total_files, 'Files_Saved': files_saved})
+        if skip_big > 0:
+            return drive_info["id"]
+        else:
+            return 0
 
 
 
@@ -325,8 +330,53 @@ class BackupFiles:
             tb = e.__traceback__
             traceback.print_tb(tb)
 
+    def cleanupBuffer(self):
+        fh = FileHelper()
+        dbh = DBHelper()
+        logger = self.log
+
+        sql_savedbuffer = "select * from ITEMS where (DRIVE1_ID > 0  and DRIVE2_ID > 0) and buffer_status = 1 order by id "
+        sql_updatebufferstatus = "UPDATE ITEMS SET BUFFER_STATUS = 2 WHERE ID = %s"
+        usage = fh.bufferusage()
+        print(usage)
+
+        try:
+            db = dbh.getDictCursor()
+            cursor = db["cursor"]
+            cursor.execute(sql_savedbuffer)
+            result = cursor.fetchall()
+
+            for file in result:
+                if usage <= 0.8:
+                    break
+                fh.removefrombuffer(file["HASH"], file["BACKUPGROUP_ID"])
+                usage = fh.bufferusage()
+                cursor.execute(sql_updatebufferstatus, (file["ID"]))
+                print("removed %s from buffer for BG %s " % (file["HASH"], file["BACKUPGROUP_ID"]))
+                print(usage)
+                logger.info({'action': 'Removed from Buffer',
+                             'hash': file["HASH"], 'bachup_group': file["BACKUPGROUP_ID"], "size": file["FILESIZE"]})
 
 
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
+
+    def set_drive_full(self, id):
+
+        cursor = self.cursor
+        sql_updateitem = 'update DRIVES set drivefull = 1 where id=%s ' % id
+
+        try:
+            cursor.execute(sql_updateitem)
+
+        except Exception as e:
+            print("Exception")  # sql error
+            print(e)
+            tb = e.__traceback__
+            traceback.print_tb(tb)
 
 def main():
     backup_files = BackupFiles()
@@ -334,7 +384,11 @@ def main():
     external = False
     if sys.argv[2] == 'E':
         external = True
-    backup_files.backup_files(backup_group, external)
+    finished = -1
+    while finished != 0:
+        finished = backup_files.backup_files(backup_group, external)
+        if finished > 0:
+            backup_files.set_drive_full(finished)
     backup_files.close_finished_runs()
 
 

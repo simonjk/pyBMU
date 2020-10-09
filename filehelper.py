@@ -9,11 +9,20 @@ import os
 class FileHelper():
 
 
+    def bufferusage(self):
+        total, used, free = shutil.disk_usage(os.getenv('BMU_BUFFER'))
+        return used/total
+
     def freespace(self, path):
 
         total, used, free = shutil.disk_usage(path)
         # print("Remaining Space in %s is %s" % (path, free))
         return free
+
+    def removefrombuffer(self, hash, backup_group):
+        path = self.buffer_path_from_hash(hash, backup_group)
+        os.remove(path)
+
 
     def buffer_path_from_hash(self, hash, backup_group):
         reserved = ['com1','com2','com3','com4','com5','com6','com7','com8','com9','lpt1','lpt2','lpt3','lpt4','lpt5','lpt6','lpt7','lpt8','lpt9']

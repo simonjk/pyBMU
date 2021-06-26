@@ -4,9 +4,16 @@ import traceback
 from pathlib import Path
 import shutil
 import os
+import json
+from loghelper import LogHelper
 
 
 class FileHelper():
+
+    def save_dict_to_file(self, dict, path):
+        self.create_parent_if_not_exist(path)
+        with open(path, 'w') as fp:
+            json.dump(dict, fp, default=str)
 
 
     def bufferusage(self):
@@ -21,7 +28,13 @@ class FileHelper():
 
     def removefrombuffer(self, hash, backup_group):
         path = self.buffer_path_from_hash(hash, backup_group)
-        os.remove(path)
+        try:
+            os.remove(path)
+        except Exception as e:
+            log_helper = LogHelper()
+            log = log_helper.getLogger()
+            log.warn({'action': 'Could not remove File from Buffer', 'hash': hash,
+                         'exception_type': type(e), 'exception': e}, exc_info=True)
 
 
     def buffer_path_from_hash(self, hash, backup_group):

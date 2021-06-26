@@ -390,6 +390,7 @@ def main():
         if finished > 0:
             backup_files.set_drive_full(finished)
     backup_files.close_finished_runs()
+    backup_files.cleanupBuffer()
 
 
 if __name__ == "__main__":
